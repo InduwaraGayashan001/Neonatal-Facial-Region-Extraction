@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['region']
+
+roboflow:
+  workspace: weq-ayzfp
+  project: neonatal-facial-regio-extraction-bjokk
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/weq-ayzfp/neonatal-facial-regio-extraction-bjokk/dataset/1
