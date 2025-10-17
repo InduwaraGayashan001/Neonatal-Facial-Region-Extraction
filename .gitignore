@@ -1,0 +1,8 @@
+/face_predictions
+*.avi
+*.mp4
+*.cache
+/runs
+/weights
+*.json
+*.pt
