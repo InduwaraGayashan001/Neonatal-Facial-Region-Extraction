@@ -10,45 +10,57 @@ import os
 from ultralytics import YOLO
 
 def detect_face(model, frame, conf_threshold=0.25):
-    """Detect face in a single frame."""
+    """Detect all faces in a single frame."""
     results = model.predict(frame, conf=conf_threshold, verbose=False)[0]
     
     if results.masks is None or len(results.masks) == 0:
-        return None, 0.0
+        return [], []
     
-    # Get the first (largest) face mask
-    mask_xy = results.masks.xy[0]
-    confidence = results.boxes.conf[0].item()
+    # Get all face masks and confidences
+    mask_polygons = [mask_xy for mask_xy in results.masks.xy]
+    confidences = [conf.item() for conf in results.boxes.conf]
     
-    return mask_xy, confidence
+    return mask_polygons, confidences
 
-def draw_mask(frame, mask_polygon, confidence, color=(0, 255, 0)):
-    """Draw polygon mask on frame."""
-    if mask_polygon is None or len(mask_polygon) == 0:
+def draw_mask(frame, mask_polygons, confidences, color=(0, 255, 0)):
+    """Draw multiple polygon masks on frame."""
+    if not mask_polygons or len(mask_polygons) == 0:
         return frame
     
     result = frame.copy()
-    pts = np.array(mask_polygon, dtype=np.int32).reshape((-1, 1, 2))
     
-    # Draw filled polygon
-    overlay = result.copy()
-    cv2.fillPoly(overlay, [pts], color)
-    cv2.addWeighted(overlay, 0.3, result, 0.7, 0, result)
-    
-    # Add confidence text
-    if len(mask_polygon) > 0:
-        x_min = int(np.min(mask_polygon[:, 0]))
-        y_min = int(np.min(mask_polygon[:, 1]))
-        cv2.putText(result, f"Face: {confidence:.2f}", (x_min, y_min - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    # Draw each mask
+    for mask_polygon, confidence in zip(mask_polygons, confidences):
+        if mask_polygon is None or len(mask_polygon) == 0:
+            continue
+            
+        pts = np.array(mask_polygon, dtype=np.int32).reshape((-1, 1, 2))
+        
+        # Draw filled polygon
+        overlay = result.copy()
+        cv2.fillPoly(overlay, [pts], color)
+        cv2.addWeighted(overlay, 0.3, result, 0.7, 0, result)
+        
+        # Add confidence text
+        if len(mask_polygon) > 0:
+            x_min = int(np.min(mask_polygon[:, 0]))
+            y_min = int(np.min(mask_polygon[:, 1]))
+            cv2.putText(result, f"Face: {confidence:.2f}", (x_min, y_min - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     
     return result
 
-def process_video(video_path, model_path, output_path, conf_threshold=0.25):
-    """Process video with continuous detection."""
+def process_continuous_detection(video_path, model_path, output_path, conf_threshold=0.25, binary_mask_only=True):
+    """Process video with continuous detection.
+    
+    Args:
+        binary_mask_only: If True, outputs only white mask on black background (no colors, no text)
+    """
     
     print("="*70)
     print("METHOD 1: CONTINUOUS DETECTION (EVERY FRAME)")
+    if binary_mask_only:
+        print("Output Mode: Binary Mask Only (No Text/Colors)")
     print("="*70)
     
     # Load model
@@ -85,19 +97,31 @@ def process_video(video_path, model_path, output_path, conf_threshold=0.25):
         
         frame_count += 1
         
-        # Detect face in current frame
-        mask_polygon, confidence = detect_face(model, frame, conf_threshold)
+        # Detect all faces in current frame
+        mask_polygons, confidences = detect_face(model, frame, conf_threshold)
         
-        if mask_polygon is not None:
-            detection_count += 1
+        if len(mask_polygons) > 0:
+            detection_count += len(mask_polygons)
         
-        # Draw detection
-        annotated_frame = draw_mask(frame, mask_polygon, confidence)
-        
-        # Add frame info
-        status = f"Frame: {frame_count}/{total_frames} | DETECTING"
-        cv2.putText(annotated_frame, status, (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # Create output frame based on mode
+        if binary_mask_only:
+            # Binary mask: only show extracted regions, rest is black
+            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+            for mask_polygon in mask_polygons:
+                if mask_polygon is not None and len(mask_polygon) > 0:
+                    pts = np.array(mask_polygon, dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.fillPoly(mask, [pts], 255)
+            # Apply mask to original frame to show only face regions
+            masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
+            annotated_frame = masked_frame
+        else:
+            # Draw detection with colors and text
+            annotated_frame = draw_mask(frame, mask_polygons, confidences)
+            
+            # Add frame info
+            status = f"Frame: {frame_count}/{total_frames} | DETECTING"
+            cv2.putText(annotated_frame, status, (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         out.write(annotated_frame)
         
@@ -127,8 +151,8 @@ def process_video(video_path, model_path, output_path, conf_threshold=0.25):
 
 if __name__ == "__main__":
     # Default configuration
-    process_video(
-        video_path="vid2.avi",
+    process_continuous_detection(
+        video_path="video/vid2.avi",
         model_path="runs/segment/train/weights/best.pt",
         output_path="method1_output.mp4",
         conf_threshold=0.25

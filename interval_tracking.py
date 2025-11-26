@@ -10,16 +10,17 @@ import os
 from ultralytics import YOLO
 
 def detect_face(model, frame, conf_threshold=0.25):
-    """Detect face in a single frame."""
+    """Detect all faces in a single frame."""
     results = model.predict(frame, conf=conf_threshold, verbose=False)[0]
     
     if results.masks is None or len(results.masks) == 0:
-        return None, 0.0
+        return [], []
     
-    mask_xy = results.masks.xy[0]
-    confidence = results.boxes.conf[0].item()
+    # Get all face masks and confidences
+    mask_polygons = [mask_xy for mask_xy in results.masks.xy]
+    confidences = [conf.item() for conf in results.boxes.conf]
     
-    return mask_xy, confidence
+    return mask_polygons, confidences
 
 def draw_mask(frame, mask_polygon, confidence, color=(0, 255, 0), status_text=""):
     """Draw polygon mask on frame."""
@@ -43,11 +44,17 @@ def draw_mask(frame, mask_polygon, confidence, color=(0, 255, 0), status_text=""
     
     return result
 
-def process_video(video_path, model_path, output_path, detection_interval=30, conf_threshold=0.25):
-    """Process video with interval-based detection."""
+def process_interval_tracking(video_path, model_path, output_path, detection_interval=30, conf_threshold=0.25, binary_mask_only=True):
+    """Process video with interval-based detection.
+    
+    Args:
+        binary_mask_only: If True, outputs only white mask on black background (no colors, no text)
+    """
     
     print("="*70)
     print("METHOD 4: INTERVAL-BASED DETECTION")
+    if binary_mask_only:
+        print("Output Mode: Binary Mask Only (No Text/Colors)")
     print("="*70)
     
     # Load model
@@ -97,36 +104,48 @@ def process_video(video_path, model_path, output_path, detection_interval=30, co
         
         if should_detect:
             # Run detection
-            mask_polygon, confidence = detect_face(model, frame, conf_threshold)
-            detection_count += 1
+            mask_polygons, confidences = detect_face(model, frame, conf_threshold)
+            detection_count += len(mask_polygons) if mask_polygons else 0
             frames_since_detection = 0
             
-            if mask_polygon is not None:
-                last_mask = mask_polygon
-                last_confidence = confidence
+            if len(mask_polygons) > 0:
+                last_mask = mask_polygons
+                last_confidence = confidences
                 color = (0, 255, 0)  # Green for detection
                 status = "DETECTING"
             else:
-                mask_polygon = last_mask
-                confidence = last_confidence * 0.5
+                mask_polygons = last_mask if last_mask else []
+                confidences = [c * 0.5 for c in last_confidence] if last_confidence else []
                 color = (0, 0, 255)  # Red for failed detection
                 status = "FAILED"
         else:
             # Use cached mask
-            mask_polygon = last_mask
-            confidence = last_confidence
+            mask_polygons = last_mask if last_mask else []
+            confidences = last_confidence if last_confidence else []
             tracking_count += 1
             color = (0, 255, 255)  # Yellow for tracking
             status = "TRACKING"
         
-        # Draw detection
-        annotated_frame = draw_mask(frame, mask_polygon, confidence, color, status)
-        
-        # Add frame info
-        next_detection = detection_interval - frames_since_detection
-        info_text = f"Frame: {frame_count}/{total_frames} | Next: {next_detection}"
-        cv2.putText(annotated_frame, info_text, (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # Create output frame based on mode
+        if binary_mask_only:
+            # Binary mask: only show extracted regions, rest is black
+            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+            for mask_polygon in mask_polygons:
+                if mask_polygon is not None and len(mask_polygon) > 0:
+                    pts = np.array(mask_polygon, dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.fillPoly(mask, [pts], 255)
+            # Apply mask to original frame to show only face regions
+            masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
+            annotated_frame = masked_frame
+        else:
+            # Draw detection with colors and text
+            annotated_frame = draw_mask(frame, mask_polygons, confidences, color, status)
+            
+            # Add frame info
+            next_detection = detection_interval - frames_since_detection
+            info_text = f"Frame: {frame_count}/{total_frames} | Next: {next_detection}"
+            cv2.putText(annotated_frame, info_text, (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         out.write(annotated_frame)
         
@@ -159,8 +178,8 @@ def process_video(video_path, model_path, output_path, detection_interval=30, co
 
 if __name__ == "__main__":
     # Default configuration
-    process_video(
-        video_path="vid2.avi",
+    process_interval_tracking(
+        video_path="video/vid2.avi",
         model_path="runs/segment/train/weights/best.pt",
         output_path="method4_output.mp4",
         detection_interval=30,

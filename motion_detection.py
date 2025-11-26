@@ -10,16 +10,17 @@ import os
 from ultralytics import YOLO
 
 def detect_face(model, frame, conf_threshold=0.25):
-    """Detect face in a single frame."""
+    """Detect all faces in a single frame."""
     results = model.predict(frame, conf=conf_threshold, verbose=False)[0]
     
     if results.masks is None or len(results.masks) == 0:
-        return None, 0.0
+        return [], []
     
-    mask_xy = results.masks.xy[0]
-    confidence = results.boxes.conf[0].item()
+    # Get all face masks and confidences
+    mask_polygons = [mask_xy for mask_xy in results.masks.xy]
+    confidences = [conf.item() for conf in results.boxes.conf]
     
-    return mask_xy, confidence
+    return mask_polygons, confidences
 
 def draw_mask(frame, mask_polygon, confidence, color=(0, 255, 0), status_text=""):
     """Draw polygon mask on frame."""
@@ -43,12 +44,18 @@ def draw_mask(frame, mask_polygon, confidence, color=(0, 255, 0), status_text=""
     
     return result
 
-def process_video(video_path, model_path, output_path, motion_threshold=5.0, 
-                 fallback_interval=60, conf_threshold=0.25):
-    """Process video with motion-triggered detection and fallbacks."""
+def process_motion_detection(video_path, model_path, output_path, motion_threshold=5.0, 
+                 fallback_interval=60, conf_threshold=0.25, binary_mask_only=True):
+    """Process video with motion-triggered detection and fallbacks.
+    
+    Args:
+        binary_mask_only: If True, outputs only white mask on black background (no colors, no text)
+    """
     
     print("="*70)
     print("METHOD 3: MOTION-TRIGGERED DETECTION (WITH FALLBACKS)")
+    if binary_mask_only:
+        print("Output Mode: Binary Mask Only (No Text/Colors)")
     print("="*70)
     
     # Load model
@@ -152,17 +159,18 @@ def process_video(video_path, model_path, output_path, motion_threshold=5.0,
         
         if should_detect:
             # Run detection
-            mask_polygon, confidence = detect_face(model, frame, conf_threshold)
-            detection_count += 1
+            mask_polygons, confidences = detect_face(model, frame, conf_threshold)
+            detection_count += len(mask_polygons) if mask_polygons else 0
             
-            if mask_polygon is not None:
-                last_mask = mask_polygon
-                last_confidence = confidence
+            if len(mask_polygons) > 0:
+                last_mask = mask_polygons
+                last_confidence = confidences
                 last_detection_frame = frame_count
                 
-                # Calculate and store bounding box for motion detection
-                x_coords = mask_polygon[:, 0]
-                y_coords = mask_polygon[:, 1]
+                # Calculate and store bounding box for motion detection (use first face)
+                first_polygon = mask_polygons[0]
+                x_coords = first_polygon[:, 0]
+                y_coords = first_polygon[:, 1]
                 last_bbox = (int(x_coords.min()), int(y_coords.min()), 
                             int(x_coords.max()), int(y_coords.max()))
                 
@@ -171,40 +179,52 @@ def process_video(video_path, model_path, output_path, motion_threshold=5.0,
                 if fallback_triggered:
                     fallback_count += 1
             else:
-                mask_polygon = last_mask
-                confidence = last_confidence * 0.5
+                mask_polygons = last_mask if last_mask else []
+                confidences = [c * 0.5 for c in last_confidence] if last_confidence else []
                 color = (0, 0, 255)  # Red for failed detection
                 status = "FAILED"
         else:
             # Use cached mask
-            mask_polygon = last_mask
-            confidence = last_confidence
+            mask_polygons = last_mask if last_mask else []
+            confidences = last_confidence if last_confidence else []
             color = (0, 255, 255)  # Yellow for tracking
             status = "TRACKING"
         
-        # Draw detection
-        annotated_frame = draw_mask(frame, mask_polygon, confidence, color, status)
-        
-        # Draw motion detection ROI if available
-        if last_bbox is not None:
-            x1, y1, x2, y2 = last_bbox
-            pad_x = int((x2 - x1) * 0.2)
-            pad_y = int((y2 - y1) * 0.2)
-            roi_x1 = max(0, x1 - pad_x)
-            roi_y1 = max(0, y1 - pad_y)
-            roi_x2 = min(width, x2 + pad_x)
-            roi_y2 = min(height, y2 + pad_y)
+        # Create output frame based on mode
+        if binary_mask_only:
+            # Binary mask: only show extracted regions, rest is black
+            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+            for mask_polygon in mask_polygons:
+                if mask_polygon is not None and len(mask_polygon) > 0:
+                    pts = np.array(mask_polygon, dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.fillPoly(mask, [pts], 255)
+            # Apply mask to original frame to show only face regions
+            masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
+            annotated_frame = masked_frame
+        else:
+            # Draw detection with colors and text
+            annotated_frame = draw_mask(frame, mask_polygons, confidences, color, status)
             
-            # Draw ROI rectangle (cyan for motion region)
-            roi_color = (255, 255, 0) if motion_detected else (128, 128, 128)
-            cv2.rectangle(annotated_frame, (roi_x1, roi_y1), (roi_x2, roi_y2), roi_color, 2)
-            cv2.putText(annotated_frame, "Motion ROI", (roi_x1, roi_y1 - 5),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, roi_color, 1)
-        
-        # Add frame info
-        info_text = f"Frame: {frame_count}/{total_frames} | Face Motion: {motion_percentage:.1f}%"
-        cv2.putText(annotated_frame, info_text, (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            # Draw motion detection ROI if available
+            if last_bbox is not None:
+                x1, y1, x2, y2 = last_bbox
+                pad_x = int((x2 - x1) * 0.2)
+                pad_y = int((y2 - y1) * 0.2)
+                roi_x1 = max(0, x1 - pad_x)
+                roi_y1 = max(0, y1 - pad_y)
+                roi_x2 = min(width, x2 + pad_x)
+                roi_y2 = min(height, y2 + pad_y)
+                
+                # Draw ROI rectangle (cyan for motion region)
+                roi_color = (255, 255, 0) if motion_detected else (128, 128, 128)
+                cv2.rectangle(annotated_frame, (roi_x1, roi_y1), (roi_x2, roi_y2), roi_color, 2)
+                cv2.putText(annotated_frame, "Motion ROI", (roi_x1, roi_y1 - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, roi_color, 1)
+            
+            # Add frame info
+            info_text = f"Frame: {frame_count}/{total_frames} | Face Motion: {motion_percentage:.1f}%"
+            cv2.putText(annotated_frame, info_text, (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         out.write(annotated_frame)
         
@@ -237,11 +257,11 @@ def process_video(video_path, model_path, output_path, motion_threshold=5.0,
 
 if __name__ == "__main__":
     # Default configuration
-    process_video(
-        video_path="vid2.avi",
+    process_motion_detection(
+        video_path="video/vid2.avi",
         model_path="runs/segment/train/weights/best.pt",
         output_path="method3_output.mp4",
-        motion_threshold=1.0,
+        motion_threshold=5.0,
         fallback_interval=60,
         conf_threshold=0.25
     )
