@@ -2,7 +2,6 @@
 *.avi
 *.mp4
 *.cache
-/runs
-/weights
 *.json
-*.pt
+*.jpg
+*.png
