@@ -5,6 +5,7 @@ Uses YOLO's native tracking capabilities for efficient processing.
 
 import os
 import time
+import subprocess
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -49,11 +50,42 @@ def process_video_with_yolo_tracking(video_path, model_path, output_dir="method2
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, "yolo_tracked_binary.mp4")
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        
+        # Detect input codec and choose appropriate output
+        input_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        uncompressed_size_mb = (width * height * 3 * total_frames) / (1024 * 1024)
+        is_compressed = input_size_mb < (uncompressed_size_mb * 0.5)
+        
+        if is_compressed:
+            print(f"Input is compressed ({input_size_mb:.1f} MB), using HuffYUV lossless codec...")
+            output_path_avi = output_path.rsplit('.', 1)[0] + '.avi'
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',
+                '-f', 'rawvideo', '-vcodec', 'rawvideo',
+                '-s', f'{width}x{height}', '-pix_fmt', 'bgr24', '-r', str(fps),
+                '-i', '-', '-an',
+                '-vcodec', 'huffyuv', '-pix_fmt', 'rgb24',
+                output_path_avi
+            ]
+            output_path = output_path_avi
+        else:
+            print(f"Input is uncompressed ({input_size_mb:.1f} MB), using rawvideo output...")
+            output_path_avi = output_path.rsplit('.', 1)[0] + '.avi'
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',
+                '-f', 'rawvideo', '-vcodec', 'rawvideo',
+                '-s', f'{width}x{height}', '-pix_fmt', 'bgr24', '-r', str(fps),
+                '-i', '-', '-an',
+                '-vcodec', 'rawvideo', '-pix_fmt', 'bgr24',
+                output_path_avi
+            ]
+            output_path = output_path_avi
+        
+        ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         
         results_gen = model.track(
             source=video_path,
@@ -82,10 +114,21 @@ def process_video_with_yolo_tracking(video_path, model_path, output_dir="method2
                 cv2.fillPoly(mask, [pts], 255)
             # Apply mask to original frame to show only face region
             masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
-            out.write(masked_frame)
+            ffmpeg_process.stdin.write(masked_frame.tobytes())
         
         cap.release()
-        out.release()
+        ffmpeg_process.stdin.close()
+        ffmpeg_process.wait()
+        
+        # Print file size comparison
+        input_size = os.path.getsize(video_path)
+        output_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+        input_size_mb = input_size / (1024 * 1024)
+        output_size_mb = output_size / (1024 * 1024)
+        size_ratio = (output_size / input_size * 100) if input_size > 0 else 0
+        print(f"\nFile Sizes:")
+        print(f"  Input:  {input_size_mb:.2f} MB")
+        print(f"  Output: {output_size_mb:.2f} MB ({size_ratio:.1f}% of input)")
     else:
         # Standard YOLO tracking with visualization
         results = model.track(

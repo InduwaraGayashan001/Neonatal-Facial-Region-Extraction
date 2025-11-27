@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import time
 import os
+import subprocess
 from ultralytics import YOLO
 
 def detect_face(model, frame, conf_threshold=0.25):
@@ -78,12 +79,45 @@ def process_continuous_detection(video_path, model_path, output_path, conf_thres
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fourcc_int = int(cap.get(cv2.CAP_PROP_FOURCC))
     
     print(f"Video: {width}x{height}, {fps} FPS, {total_frames} frames")
     
-    # Setup output
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    # Detect input codec and choose appropriate output
+    input_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+    # Calculate expected uncompressed size (width * height * 3 bytes per pixel * frames)
+    uncompressed_size_mb = (width * height * 3 * total_frames) / (1024 * 1024)
+    # If input is less than 50% of uncompressed size, it's compressed
+    is_compressed = input_size_mb < (uncompressed_size_mb * 0.5)
+    
+    if is_compressed:
+        # Input is compressed, use HuffYUV for lossless but reasonable file size
+        print(f"Input is compressed ({input_size_mb:.1f} MB), using HuffYUV lossless codec...")
+        output_path_avi = output_path.rsplit('.', 1)[0] + '.avi'
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-f', 'rawvideo', '-vcodec', 'rawvideo',
+            '-s', f'{width}x{height}', '-pix_fmt', 'bgr24', '-r', str(fps),
+            '-i', '-', '-an',
+            '-vcodec', 'huffyuv', '-pix_fmt', 'rgb24',
+            output_path_avi
+        ]
+        output_path = output_path_avi
+    else:
+        # Input is uncompressed, match with rawvideo output
+        print(f"Input is uncompressed ({input_size_mb:.1f} MB), using rawvideo output...")
+        output_path_avi = output_path.rsplit('.', 1)[0] + '.avi'
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-f', 'rawvideo', '-vcodec', 'rawvideo',
+            '-s', f'{width}x{height}', '-pix_fmt', 'bgr24', '-r', str(fps),
+            '-i', '-', '-an',
+            '-vcodec', 'rawvideo', '-pix_fmt', 'bgr24',
+            output_path_avi
+        ]
+        output_path = output_path_avi
+    
+    ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     
     # Process frames
     start_time = time.time()
@@ -123,7 +157,7 @@ def process_continuous_detection(video_path, model_path, output_path, conf_thres
             cv2.putText(annotated_frame, status, (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        out.write(annotated_frame)
+        ffmpeg_process.stdin.write(annotated_frame.tobytes())
         
         # Progress update
         if frame_count % 50 == 0:
@@ -132,12 +166,20 @@ def process_continuous_detection(video_path, model_path, output_path, conf_thres
     
     # Cleanup
     cap.release()
-    out.release()
+    ffmpeg_process.stdin.close()
+    ffmpeg_process.wait()
     
     # Calculate stats
     total_time = time.time() - start_time
     detection_rate = detection_count / frame_count if frame_count > 0 else 0
     processing_fps = frame_count / total_time if total_time > 0 else 0
+    
+    # Get file sizes
+    input_size = os.path.getsize(video_path)
+    output_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+    input_size_mb = input_size / (1024 * 1024)
+    output_size_mb = output_size / (1024 * 1024)
+    size_ratio = (output_size / input_size * 100) if input_size > 0 else 0
     
     # Print results
     print("\n" + "="*70)
@@ -147,12 +189,15 @@ def process_continuous_detection(video_path, model_path, output_path, conf_thres
     print(f"Detections: {detection_count} ({detection_rate:.1%})")
     print(f"Processing Time: {total_time:.2f} seconds")
     print(f"Processing Speed: {processing_fps:.1f} FPS")
+    print(f"\nFile Sizes:")
+    print(f"  Input:  {input_size_mb:.2f} MB")
+    print(f"  Output: {output_size_mb:.2f} MB ({size_ratio:.1f}% of input)")
     print(f"Output saved to: {output_path}")
 
 if __name__ == "__main__":
     # Default configuration
     process_continuous_detection(
-        video_path="video/vid2.avi",
+        video_path="videos/vid.avi",
         model_path="runs/segment/train/weights/best.pt",
         output_path="method1_output.mp4",
         conf_threshold=0.25
